@@ -1,0 +1,185 @@
+blueprint:
+  name: "\U0001F9E0\U0000207A Smarter Thermostat"
+  author: "Murat Çeşmecioğlu"
+  description: "# \U0001F9E0\U0000207A Smarter Thermostat \n
+    A sophisticated Home Assistant blueprint that intelligently controls your thermostat based on window/door sensors and weather conditions. This automation helps you save energy by automatically managing your heating system while maintaining comfort in your home.\n
+    \n
+    Read more: https://community.home-assistant.io/t/smarter-thermostat/793618"
+  domain: automation
+  source_url: https://github.com/muratcesmecioglu/ha-smarter-thermostat/blob/main/smarter-thermostat.yaml
+  input:
+    window_sensor:
+      name: "Window / Door Sensor Group"
+      description: "Select your grouped or single window / door sensor."
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: false
+    window_delay:
+      name: "Window / Door Sensor Delay"
+      description: >
+        Time the sensor needs to stay the same after change to trigger the automation. This is done to avoid retriggering. (Default = 5s)
+        
+        `When window opens, automation will wait 5 seconds and then turn off heating.`
+      default: 5
+      selector:
+        number:
+          mode: box
+          min: 0.0
+          max: 3600.0
+          unit_of_measurement: seconds
+          step: 1.0
+    weather:
+      name: "Weather"
+      description: "Select your weather entity to get the current outside temperature from."
+      selector:
+        entity:
+          domain: weather
+          multiple: false
+    wintermode:
+      name: "Winter Mode Threshold"
+      description: >
+        The ouside temperature needs to be below this to activate winter mode. (Default = 16°C)
+        
+        `Outside temperature must be below this value for heating. We don't need to heat when the weather is hot`
+      default: 16
+      selector:
+        number:
+          step: 0.5
+          min: 0.0
+          max: 150.0
+          unit_of_measurement: °C or °F
+          mode: slider
+    wintermode_delay:
+      name: "Winter Mode Delay"
+      description: >
+        Time the outside temperature neeeds to stay above the winter mode temperature to turn the heating off.
+        
+        `If the outside temperature remains above the threshold value for this period of time, the heating will be switched off.`
+      default: 30
+      selector:
+        number:
+          mode: box
+          min: 1.0
+          max: 86400.0
+          unit_of_measurement: minutes
+          step: 1.0
+    thermostat:
+      name: "Thermostat"
+      selector:
+        entity:
+          domain: climate
+          multiple: false
+    schedule_helper:
+      name: "Schedule Helper"
+      description: "Select the schedule helper entity to determine active times for the thermostat."
+      selector:
+        entity:
+          domain: schedule
+    bypass_switch:
+      name: "Bypass Switch"
+      description: "Select a switch or input boolean to bypass the schedule."
+      selector:
+        entity:
+          domain:
+            - switch
+            - input_boolean
+
+trigger:
+  - platform: state
+    entity_id: !input window_sensor
+  - platform: numeric_state
+    entity_id: !input weather
+    attribute: temperature
+    below: !input wintermode
+  - platform: numeric_state
+    entity_id: !input weather
+    attribute: temperature
+    above: !input wintermode
+  - platform: state
+    entity_id: !input schedule_helper
+  - platform: state
+    entity_id: !input bypass_switch
+  - trigger: event
+    event_type: automation_reloaded
+    id: smarterthermostat_change_reload
+
+action:
+  - choose:
+      # CASE 1: Bypass ON - Ignore Schedule Helper
+      - conditions:
+          - condition: and
+            conditions:
+              - condition: state
+                entity_id: !input bypass_switch
+                state: 'on'
+              - condition: state
+                entity_id: !input window_sensor
+                state: "off"
+              - condition: numeric_state
+                entity_id: !input weather
+                attribute: temperature
+                below: !input wintermode
+        sequence:
+          - service: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            entity_id: !input thermostat
+          - service: logbook.log
+            data:
+              name: "Smarter Thermostat"
+              message: "HEAT mode activated: Bypass ON, Window closed, Temperature {{ states.weather[input_weather.entity_id.split('.')[1]].attributes.temperature }}°C below threshold ({{ states[input_wintermode.entity_id.split('.')[0]][input_wintermode.entity_id.split('.')[1]].state }}°C)"
+
+      # CASE 2: Bypass OFF and Schedule ON
+      - conditions:
+          - condition: and
+            conditions:
+              - condition: state
+                entity_id: !input bypass_switch
+                state: 'off'
+              - condition: state
+                entity_id: !input schedule_helper
+                state: 'on'
+              - condition: state
+                entity_id: !input window_sensor
+                state: "off"
+              - condition: numeric_state
+                entity_id: !input weather
+                attribute: temperature
+                below: !input wintermode
+        sequence:
+          - service: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            entity_id: !input thermostat
+          - service: logbook.log
+            data:
+              name: "Smarter Thermostat"
+              message: "HEAT mode activated: Schedule ON, Window closed, Temperature {{ states.weather[input_weather.entity_id.split('.')[1]].attributes.temperature }}°C below threshold ({{ states[input_wintermode.entity_id.split('.')[0]][input_wintermode.entity_id.split('.')[1]].state }}°C)"
+
+    # DEFAULT: Set to OFF if none of the above conditions are met
+    default:
+      - service: climate.set_hvac_mode
+        data:
+          hvac_mode: "off"
+        entity_id: !input thermostat
+      - service: logbook.log
+        data:
+          name: "Smarter Thermostat"
+          message: >-
+            Heating is OFF because: 
+            {% if is_state(states('input_boolean.bypass_switch'), 'on') %}
+              {% if is_state(states('binary_sensor.window_sensor'), 'on') %}
+                Window is open
+              {% elif state_attr('weather.home', 'temperature') > states('input_number.wintermode') %}
+                Temperature ({{ state_attr('weather.home', 'temperature') }}°C) above threshold ({{ states('input_number.wintermode') }}°C)
+              {% endif %}
+            {% else %}
+              {% if is_state('input_boolean.schedule_helper', 'off') %}
+                Schedule is OFF (and Bypass is OFF)
+              {% elif is_state(states('binary_sensor.window_sensor'), 'on') %}
+                Window is open
+              {% elif state_attr('weather.home', 'temperature') > states('input_number.wintermode') %}
+                Temperature ({{ state_attr('weather.home', 'temperature') }}°C) above threshold ({{ states('input_number.wintermode') }}°C)
+              {% endif %}
+            {% endif %}
